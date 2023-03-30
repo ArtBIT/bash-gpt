@@ -1,0 +1,198 @@
+#!/bin/bash
+
+OPENAI_API_BASE="https://api.openai.com/v1"
+OPENAI_API_KEY="Get your API key from https://platform.openai.com/account/api-keys"
+OPENAI_ORG_KEY="Get your Organization ID from https://platform.openai.com/account/org-settings"
+OPENAI_MODEL=gpt-3.5-turbo
+
+# Here, we will store our chats history
+BASH_GPT_DIR="${HOME}/.bash-gpt"
+if [ ! -d "${BASH_GPT_DIR}" ]; then
+    mkdir -p "${BASH_GPT_DIR}"
+fi
+# The subject is the filename of our conversation history that we store in $BASH_GPT_DIR
+export BASH_GPT_SUBJECT="main"
+
+bash_gpt_colorize() {
+    echo "$(tput setaf ${1})${2}$(tput setaf 7)"
+}
+BASH_GPT_USER="$(tput setaf 2)user:$(tput setaf 7)"    # set "user:" text color to green
+BASH_GPT_AI="$(tput setaf 3)assistant:$(tput setaf 7)" # set "assistant:" text color to gold
+
+bash_gpt_debug() {
+    local CHANNEL="$1"
+    local IGNORE=1
+    local MSTS=$(($(date +%s%N)/1000000))
+    shift
+    if [ ! -z "$CHANNEL" ]; then
+        if [ "$CHANNEL" == "error" ]; then
+            IGNORE=0
+        elif [ ! -z "$DEBUG" ]; then
+            RULES="\(${DEBUG//,/\\|}\)"
+            if echo "$CHANNEL" | grep -q "$RULES"; then
+                IGNORE=0
+            fi
+        fi
+    fi
+    if [ "$DEBUG" == '*' ]; then
+        IGNORE=0
+    fi
+    if [ $IGNORE -eq 0 ]; then
+        echo -e "${CHANNEL}: ($MSTS) $@" >&2
+    fi
+}
+
+# OPENAI
+
+## generic openai endpoint helper function
+bash_gpt_endpoint() {
+    METHOD=$1
+    API_URL="${OPENAI_API_BASE}/$2"
+    shift 2
+    API_DATA="$@"
+
+    # Make a POST request to the API
+    bash_gpt_debug "api" "curl -X $METHOD -H \"Content-Type: application/json\" -H \"Authorization: Bearer ${OPENAI_API_KEY}\" -H \"OpenAI-Organization: ${OPENAI_ORG_KEY}\" -d \"${API_DATA}\" \"${API_URL}\"" 1>&2
+
+    response=$(curl -X $METHOD \
+         -H "Content-Type: application/json" \
+         -H "Authorization: Bearer ${OPENAI_API_KEY}" \
+         -H "OpenAI-Organization: ${OPENAI_ORG_KEY}" \
+         -d "${API_DATA}" \
+         -s \
+         "${API_URL}")
+
+    bash_gpt_debug "api" "$response"
+    echo "$response"
+}
+
+## generic openai endpoint GET request
+bash_gpt_get() {
+    bash_gpt_endpoint GET $@
+}
+## generic openai endpoint POST request
+bash_gpt_post() {
+    bash_gpt_endpoint POST $@
+}
+## openai completions endpoint request
+bash_gpt_completions() {
+    bash_gpt_save_message user "$@"
+    messages=$(bash_gpt_load_messages)
+    bash_gpt_debug messages "$messages"
+
+    API_DATA=$(cat <<EOF
+{
+  "model": "$OPENAI_MODEL",
+  "messages": $messages,
+  "max_tokens": 500,
+  "temperature": 0.5
+}
+EOF
+    )
+
+    response=$(bash_gpt_post chat/completions "$API_DATA")
+    error=$(echo "$response" | jq -r '.error.message')
+    if [ "$error" != "null" ]; then
+        echo "$error" 1>&2
+        return 1
+    fi
+    message=$(echo "$response" | jq -c '.choices[0].message')
+    if [ "$message" != "null" ]; then
+        role=$(echo "$message" | jq -c -r '.role')
+        content=$(echo "$message" | jq -c -r '.content')
+        bash_gpt_save_message "$role" "$content"
+    fi
+    echo "$response" | jq -r '.choices[0].message.content'
+}
+
+# HISTORY
+
+## Get the path to the history file depending on the subject
+bash_gpt_subject_file() {
+    filepath="${BASH_GPT_DIR}/${1}"
+    if [ ! -e "$filepath" ]; then
+        touch "$filepath"
+    fi
+    echo "$filepath"
+}
+
+## Change the subject (and therefore the history file)
+bash_gpt_set_subject() {
+    bash_gpt_debug "subject" "Setting subject to $1"
+    export BASH_GPT_SUBJECT=$1
+}
+
+## Clear the history for the chosen subject
+bash_gpt_reset_subject_file() {
+    filepath=$(bash_gpt_subject_file $BASH_GPT_SUBJECT)
+    bash_gpt_debug "subject" "subject file is $filepath"
+    >"$filepath"
+}
+
+## Add the user prompt to the subject history
+bash_gpt_save_message() {
+    role="$1"
+    shift
+    content=$(echo "$@" | tr -d '\n')
+    content="${content@Q}"
+    content=$(echo "${content:1:-1}" | jq -R -s '.') # | sed 's/[$`]/\\&/g')
+    filepath=$(bash_gpt_subject_file $BASH_GPT_SUBJECT)
+    echo "{\"role\": \"$role\", \"content\": ${content}}" >> "$filepath"
+}
+## load all messages from the history file
+bash_gpt_load_messages() {
+    filepath=$(bash_gpt_subject_file $BASH_GPT_SUBJECT)
+    bash_gpt_debug messages "Using messages file $filepath"
+    contents=$(cat "$filepath" | tr "\n" "," | head -c -1)
+    bash_gpt_debug messages "$contents"
+    echo "[$contents]" | jq  
+}
+
+
+# our chat loop, it shows the message history, and then waits for the user input and sends the request to the API
+bash_gpt_chat() {
+    # Show subject
+    messages=$(bash_gpt_load_messages | jq '.[] | [.role,": ", .content] | add' | sed 's/^/\necho -e /g')
+    if [ ! -z "$messages" ]; then
+        hist=$(eval "echo $messages" | sed -e 's/\\//g' -e "s/'''/'/g")
+        echo -e "$hist" | sed -e "s/^user:/\n${BASH_GPT_USER}/g" -e "s/^assistant:/\n${BASH_GPT_AI}/g"
+    fi
+
+    while true; do
+        read -p "${BASH_GPT_USER} " prompt
+        cmd=$(echo "$prompt" | tr '[:upper:]' '[:lower:]')
+        case "$cmd" in
+            quit|exit|bye|goodbye) 
+                break;;
+            *)
+                if [ "${#cmd}" -le 8 ]; then
+                    echo "system: The prompt is too short, make it at east 8 characters long."
+                    continue
+                fi
+                ;;
+        esac
+        echo -e "${BASH_GPT_AI} "
+        bash_gpt_completions "$prompt"
+        echo -e "\n"
+    done
+}
+
+# Our main entry function, check the global options and start the chat loop
+gpt() {
+    echo "Welcome to Bash-GPT!"
+    while getopts "d:rs:" OPT; do
+      case $OPT in
+        d) DEBUG="${OPTARG}";;
+        s) bash_gpt_set_subject "${OPTARG}" ;;
+        r) bash_gpt_reset_subject_file ;;
+        *)
+          echo "Invalid option ${OPTARG}" >&2
+          return 1
+          ;;
+      esac
+    done
+    bash_gpt_chat
+}
+
+# If the file is not sourced, run the main fuction
+[[ "${BASH_SOURCE[0]}" == "${0}" ]] && gpt "$@"
