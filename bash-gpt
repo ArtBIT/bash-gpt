@@ -180,15 +180,27 @@ bash_gpt_chat() {
 # Our main entry function, check the global options and start the chat loop
 gpt() {
     echo "Welcome to Bash-GPT!"
-    while getopts "d:rs:" OPT; do
-      case $OPT in
-        d) DEBUG="${OPTARG}";;
-        s) bash_gpt_set_subject "${OPTARG}" ;;
-        r) bash_gpt_reset_subject_file ;;
-        *)
-          echo "Invalid option ${OPTARG}" >&2
-          return 1
-          ;;
+    while true; do
+        case "$1" in
+            -d | --debug) 
+                DEBUG="${2}"
+                shift 2
+                ;;
+            -s | --subject) 
+                bash_gpt_set_subject "${2}"
+                shift 2
+                ;;
+            -r | --reset-subject) 
+                bash_gpt_reset_subject_file 
+                shift
+                ;;
+            *)
+                if [ -z "$1" ]; then
+                    break
+                fi
+                bash_gpt_set_subject "${1}"
+                shift 1
+                ;;
       esac
     done
     bash_gpt_chat
