@@ -3,6 +3,12 @@
 
 Bash GPT is a simple CLI script written in Bash to interface with OepnAI's chat GPT API.
 
+# Prerequisites
+You need the openAI API key and Organization ID:
+ - Get your API key from https://platform.openai.com/account/api-keys
+ - Get your Organization ID from https://platform.openai.com/account/org-settings
+
+
 # Installation
 ```
 git clone https://github.com/ArtBIT/bash-gpt.git
